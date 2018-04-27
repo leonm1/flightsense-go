@@ -31,6 +31,7 @@ func Get(a airports.Airport, t time.Time, conc chan bool) (map[string]interface{
 	// In case of cache hit
 	mu.RLock()
 	if res, err := cachemap.Get(hash); err == nil {
+		defer mu.RUnlock()
 		err = json.Unmarshal([]byte(res), &ret)
 		if err != nil {
 			log.Fatal(err)

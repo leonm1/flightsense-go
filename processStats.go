@@ -213,7 +213,7 @@ func readFile(infilename string, outfilename string) {
 		wg.Add(1)
 		jobs <- true // Limit concurrency
 
-		func(row []string) {
+		go func(row []string) {
 			defer wg.Done()
 
 			f, err := parseRow(row, header)
