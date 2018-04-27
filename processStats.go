@@ -264,23 +264,25 @@ func worker(jobs chan *Flight, printc chan *[]string) {
 		}
 
 		// Parse origin fields
-		f.TempOrigin = weatherOrigin["temperature"].(float64)
-		if _, ok := weatherOrigin["precipIntensity"]; !ok {
+		f.TempOrigin, err = strconv.ParseFloat(weatherOrigin["temperature"], 64)
+		check(err)
+		if v, ok := weatherOrigin["precipIntensity"]; !ok || v == "" {
 			f.PrecipTypeOrigin = "none"
 			f.PrecipIntensityOrigin = 0
 		} else {
-			f.PrecipTypeOrigin = weatherOrigin["precipType"].(string)
-			f.PrecipIntensityOrigin = weatherOrigin["precipIntensity"].(float64)
+			f.PrecipTypeOrigin = weatherOrigin["precipType"]
+			f.PrecipIntensityOrigin, err = strconv.ParseFloat(weatherOrigin["precipIntensity"], 64)
+			check(err)
 		}
 
 		// Parse destination fields
-		f.TempDest = weatherDest["temperature"].(float64)
-		if _, ok := weatherDest["precipIntensity"]; !ok {
+		f.TempDest, err = strconv.ParseFloat(weatherDest["temperature"], 64)
+		if v, ok := weatherDest["precipIntensity"]; !ok || v == "" {
 			f.PrecipTypeDest = "none"
 			f.PrecipIntensityDest = 0
 		} else {
-			f.PrecipTypeDest = weatherDest["precipType"].(string)
-			f.PrecipIntensityDest = weatherDest["precipIntensity"].(float64)
+			f.PrecipTypeDest = weatherDest["precipType"]
+			f.PrecipIntensityDest, err = strconv.ParseFloat(weatherDest["precipIntensity"], 64)
 		}
 
 		printc <- f.toSlice()
