@@ -2,14 +2,11 @@ package main
 
 import (
 	"encoding/csv"
-	"flag"
 	"fmt"
 	"io"
 	"log"
 	"os"
-	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -21,8 +18,7 @@ import (
 )
 
 const (
-	weatherURL       = "http://localhost"
-	concurrencyLimit = 8
+	concurrencyLimit = 32
 )
 
 var header = []string{"absoluteTime",
@@ -45,9 +41,6 @@ var header = []string{"absoluteTime",
 	"precipTypeDest",
 	"precipIntensityDest",
 }
-
-type date time.Time
-type numBool bool
 
 // Flight includes data relating to weather conditions and general flight information
 type Flight struct {
@@ -85,82 +78,8 @@ func main() {
 	logW := io.MultiWriter(os.Stdout, logFile)
 	log.SetOutput(logW)
 
-	// Parse command-line flags for input and output files
-	inname := flag.String("in", "", "Optional: Input file name")
-	infolder := flag.String("indir", "", "Directory of source data files; Overrides in flag")
-	outFolder := flag.String("outdir", "", "Directory of destination data files")
-	flag.Parse()
-
-	var (
-		files     []string
-		filenames []string
-		outPath   string
-	)
-
-	if *inname == "" && *infolder == "" {
-		log.Fatalf("Input arguments requrired!")
-	}
-
-	if strings.Contains(*inname, "/") && *infolder == "" {
-		s := strings.Split(*inname, "/")
-
-		// Set filename as inname
-		*inname = s[len(s)-1]
-
-		// Remove filename
-		s = s[:len(s)-1]
-		//log.Printf("*inname is now '%s'", *inname)
-		*infolder = strings.Join(s, "/")
-		log.Printf("*infolder is now '%s'", *infolder)
-	}
-
-	if !strings.HasSuffix(*outFolder, "/") {
-		if *outFolder == "" {
-			outPath = "./"
-		} else {
-			outPath = *outFolder + "/"
-		}
-	}
-
-	// Read all csv files in indir, skipping subdirectories
-	filepath.Walk(*infolder, func(path string, f os.FileInfo, _ error) error {
-		if f.IsDir() && path != *infolder {
-			log.Printf("Skipping dir \"%s\"", f.Name())
-			// Skip subdirectories
-			return filepath.SkipDir
-		} else if *inname != "" {
-			if f.Name() == *inname {
-				files = append(files, path)
-				filenames = append(filenames, f.Name())
-			}
-		} else if filepath.Ext(path) == ".csv" {
-			files = append(files, path)
-			filenames = append(filenames, f.Name())
-		}
-
-		return nil
-	})
-
-	// Check to ensure input files exist
-	for _, v := range files {
-		if _, err := os.Stat(v); err != nil {
-			if os.IsNotExist(err) {
-				log.Fatalf("Error 404 - File not found: \"%s\".\nHere's the error: %s", v, err)
-			}
-		} else {
-			log.Printf("Found file \"%s\"", v)
-		}
-	}
-
-	// Check if outdir exists
-	if _, err := os.Stat(outPath); err != nil {
-		if os.IsNotExist(err) {
-			os.Create(outPath)
-			log.Printf("Output directory not found, created '%s'", outPath)
-		} else {
-			log.Fatal(err)
-		}
-	}
+	// Load files
+	files, filenames, outPath := parseArguments()
 
 	// Load environment vars (DARK_SKY_API_KEY)
 	err = godotenv.Load(".env")
@@ -174,22 +93,18 @@ func main() {
 		log.Fatal(err)
 	}
 
-	for i, in := range files {
-		log.Printf("Processing %s to %s", in, outPath+filenames[i])
-		readFile(in, outPath+filenames[i])
+	for i, in := range *files {
+		log.Printf("Processing %s to %s", in, *outPath+(*filenames)[i])
+		readFile(in, *outPath+(*filenames)[i])
 	}
 
 }
 
 func readFile(infilename string, outfilename string) {
-	var (
-		wg sync.WaitGroup
-		f  Flight
-	)
-	printc := make(chan []string)
-	donec := make(chan bool)
-	conc := make(chan bool, 1) // 1 is concurrency limit for http get requests to darkSky
-	defer close(donec)
+	var wg sync.WaitGroup
+	printc := make(chan *[]string)
+	jobs := make(chan *Flight)
+	rowc := make(chan *[]string)
 
 	// Create CSV reader
 	infile, err := os.Open(infilename)
@@ -204,169 +119,178 @@ func readFile(infilename string, outfilename string) {
 	check(err)
 
 	// Start writer thread
-	go printer(donec, printc, outfilename, f)
+	go printer(printc, &outfilename, &wg)
 
-	jobs := make(chan bool, concurrencyLimit)
+	// Start worker threads
+	for w := 0; w < concurrencyLimit; w++ {
+		go parser(rowc, jobs, &header, &wg)
+		go worker(jobs, printc)
+	}
 
-	// Iterate through
+	// Iterate through file
 	for row, err := r.Read(); err == nil; row, err = r.Read() {
 		wg.Add(1)
-		jobs <- true // Limit concurrency
-
-		go func(row []string) {
-			defer wg.Done()
-
-			f, err := parseRow(row, header)
-			if err != nil {
-				log.Printf("Error parsing flight data, flight skipped: %s", err)
-			} else {
-				parseWeatherData(&f, conc)
-				printc <- *toSlice(f)
-			}
-
-			// Concurrency limit
-			<-jobs
-		}(row)
+		rowc <- &row
 	}
 
 	wg.Wait()
-	close(printc)
-	<-donec
+	close(jobs)
 }
 
-func parseWeatherData(f *Flight, conc chan bool) {
-	weatherOrigin, err := weather.Get(f.Origin, f.ScheduledDep, conc)
-	if err != nil {
-		if err != nil {
-			log.Fatalf("Could not get weather for %s on %s: %s", f.Origin.IATA, f.ScheduledDep.String(), err)
-		}
-	}
-
-	weatherDest, err := weather.Get(f.Destination, f.ScheduledDep, conc)
-	if err != nil {
-		if err != nil {
-			log.Fatalf("Could not get weather for %s on %s: %s", f.Destination.IATA, f.ScheduledDep.String(), err)
-		}
-	}
-
-	// Parse origin fields
-	f.TempOrigin = weatherOrigin["temperature"].(float64)
-	if _, ok := weatherOrigin["precipIntensity"]; !ok {
-		f.PrecipTypeOrigin = "none"
-		f.PrecipIntensityOrigin = 0
-	} else {
-		f.PrecipTypeOrigin = weatherOrigin["precipType"].(string)
-		f.PrecipIntensityOrigin = weatherOrigin["precipIntensity"].(float64)
-	}
-
-	// Parse destination fields
-	f.TempDest = weatherDest["temperature"].(float64)
-	if _, ok := weatherDest["precipIntensity"]; !ok {
-		f.PrecipTypeDest = "none"
-		f.PrecipIntensityDest = 0
-	} else {
-		f.PrecipTypeDest = weatherDest["precipType"].(string)
-		f.PrecipIntensityDest = weatherDest["precipIntensity"].(float64)
-	}
-}
-
-func parseRow(r []string, h []string) (Flight, error) {
+func parser(rowc chan *[]string, jobs chan *Flight, h *[]string, wg *sync.WaitGroup) {
 	var (
+		r   *[]string
 		f   Flight
 		err error
 	)
-	values := make(map[string]string)
 
-	// Initialize values into map
-	for i, v := range h {
-		values[v] = r[i]
+	skip := func() {
+		log.Printf("Skipping line: %s because of error:%s", *r, err)
+		wg.Done()
 	}
 
-	// Date
-	f.Date = values["FL_DATE"]
+	for r = range rowc {
+		values := make(map[string]string)
 
-	// Carrier airline struct
-	carrier, err := airlines.LookupIATA(values["CARRIER"])
-	if err != nil {
-		return f, fmt.Errorf("line: %s\n could not find airline '%s': %s", r, values["CARRIER"], err.Error())
-	}
-	f.Carrier = carrier
-
-	// Origin Airport struct
-	orig, err := airports.LookupIATA(values["ORIGIN"])
-	if err != nil {
-		return f, fmt.Errorf("line: %s\n could not find airport '%s': %s", r, values["ORIGIN"], err.Error())
-	}
-	f.Origin = orig
-	location, err := time.LoadLocation(f.Origin.Tz)
-	check(err)
-
-	// Destination Airport struct
-	dest, err := airports.LookupIATA(values["DEST"])
-	if err != nil {
-		return f, fmt.Errorf("line: %s\n could not find airport '%s': %s", r, values["DEST"], err.Error())
-	}
-	f.Destination = dest
-
-	// Cancellation status
-	if values["CANCELLED"] == "1.00" {
-		f.Cancelled = true
-	} else {
-		f.Cancelled = false
-	}
-
-	// Scheduled Departure time
-	f.ScheduledDep, err = time.Parse("15042006-01-02", values["CRS_DEP_TIME"]+values["FL_DATE"])
-	f.ScheduledDep = f.ScheduledDep.In(location)
-	if err != nil {
-		return f, fmt.Errorf("line: %s\n could not parse time '%s': %s", r, values["CRS_DEP_TIME"], err.Error())
-	}
-
-	// Cancellation code
-	f.CancellationCode = values["CANCELLATION_CODE"]
-
-	if !f.Cancelled {
-		// Actual Departure time
-		if values["DEP_TIME"] == "2400" {
-			values["DEP_TIME"] = "2359"
+		// Initialize values into map
+		for i, v := range *h {
+			values[v] = (*r)[i]
 		}
-		f.ActualDep, err = time.Parse("15042006-01-02", values["DEP_TIME"]+values["FL_DATE"])
-		f.ActualDep = f.ActualDep.In(location)
+
+		// Date
+		f.Date = values["FL_DATE"]
+
+		// Carrier airline struct
+		carrier, err := airlines.LookupIATA(values["CARRIER"])
 		if err != nil {
-			return f, fmt.Errorf("line: %s\n could not parse time '%s': %s", r, values["DEP_TIME"], err.Error())
+			skip()
+			continue
 		}
+		f.Carrier = carrier
 
-		// Delay (in minutes)
-		if values["WEATHER_DELAY"] != "" {
-			delay, err := strconv.ParseFloat(values["DEP_DELAY"], 64)
-			if err != nil {
-				return f, fmt.Errorf("line: %s\n could not parse delay '%s': %s", r, values["DEP_DELAY"], err.Error())
-			}
-			if delay < 0 {
-				delay = 0
-			}
-			f.Delay = int(delay)
-		} else {
-			f.Delay = 0
+		// Origin Airport struct
+		orig, err := airports.LookupIATA(values["ORIGIN"])
+		if err != nil {
+			skip()
+			continue
 		}
+		f.Origin = orig
+		location, err := time.LoadLocation(f.Origin.Tz)
+		check(err)
 
-		// Flight diverted flag
+		// Destination Airport struct
+		dest, err := airports.LookupIATA(values["DEST"])
+		if err != nil {
+			skip()
+			continue
+		}
+		f.Destination = dest
+
 		// Cancellation status
-		if values["DIVERTED"] == "1.00" {
-			f.Diverted = true
+		if values["CANCELLED"] == "1.00" {
+			f.Cancelled = true
 		} else {
-			f.Diverted = false
+			f.Cancelled = false
 		}
-	}
 
-	return f, nil
+		// Scheduled Departure time
+		f.ScheduledDep, err = time.Parse("15042006-01-02", values["CRS_DEP_TIME"]+values["FL_DATE"])
+		f.ScheduledDep = f.ScheduledDep.In(location)
+		if err != nil {
+			skip()
+			continue
+		}
+
+		// Cancellation code
+		f.CancellationCode = values["CANCELLATION_CODE"]
+
+		if !f.Cancelled {
+			// Actual Departure time
+			if values["DEP_TIME"] == "2400" {
+				values["DEP_TIME"] = "2359"
+			}
+			f.ActualDep, err = time.Parse("15042006-01-02", values["DEP_TIME"]+values["FL_DATE"])
+			f.ActualDep = f.ActualDep.In(location)
+			if err != nil {
+				skip()
+				continue
+			}
+
+			// Delay (in minutes)
+			if values["WEATHER_DELAY"] != "" {
+				delay, err := strconv.ParseFloat(values["DEP_DELAY"], 64)
+				if err != nil {
+					skip()
+					continue
+				}
+				if delay < 0 {
+					delay = 0
+				}
+				f.Delay = int(delay)
+			} else {
+				f.Delay = 0
+			}
+
+			// Flight diverted flag
+			// Cancellation status
+			if values["DIVERTED"] == "1.00" {
+				f.Diverted = true
+			} else {
+				f.Diverted = false
+			}
+		}
+
+		jobs <- &f
+	}
 }
 
-func printer(donec chan bool, printc chan []string, outname string, f Flight) {
+func worker(jobs chan *Flight, printc chan *[]string) {
+	for f := range jobs {
+		weatherOrigin, err := weather.Get(f.Origin, f.ScheduledDep)
+		if err != nil {
+			if err != nil {
+				log.Fatalf("Could not get weather for %s on %s: %s", f.Origin.IATA, f.ScheduledDep.String(), err)
+			}
+		}
+
+		weatherDest, err := weather.Get(f.Destination, f.ScheduledDep)
+		if err != nil {
+			if err != nil {
+				log.Fatalf("Could not get weather for %s on %s: %s", f.Destination.IATA, f.ScheduledDep.String(), err)
+			}
+		}
+
+		// Parse origin fields
+		f.TempOrigin = weatherOrigin["temperature"].(float64)
+		if _, ok := weatherOrigin["precipIntensity"]; !ok {
+			f.PrecipTypeOrigin = "none"
+			f.PrecipIntensityOrigin = 0
+		} else {
+			f.PrecipTypeOrigin = weatherOrigin["precipType"].(string)
+			f.PrecipIntensityOrigin = weatherOrigin["precipIntensity"].(float64)
+		}
+
+		// Parse destination fields
+		f.TempDest = weatherDest["temperature"].(float64)
+		if _, ok := weatherDest["precipIntensity"]; !ok {
+			f.PrecipTypeDest = "none"
+			f.PrecipIntensityDest = 0
+		} else {
+			f.PrecipTypeDest = weatherDest["precipType"].(string)
+			f.PrecipIntensityDest = weatherDest["precipIntensity"].(float64)
+		}
+
+		printc <- f.toSlice()
+	}
+
+	close(printc)
+}
+
+func printer(jobs chan *[]string, outname *string, wg *sync.WaitGroup) {
 	// Create and open outfile
-	outfile, err := os.Create(outname)
+	outfile, err := os.Create(*outname)
 	if err != nil {
-		log.Fatalf("Cannot open '%s': %s\n", outname, err.Error())
+		log.Fatalf("Cannot open '%s': %s\n", *outname, err.Error())
 	}
 	w := csv.NewWriter(outfile)
 	defer func() {
@@ -378,19 +302,13 @@ func printer(donec chan bool, printc chan []string, outname string, f Flight) {
 	w.Write(header)
 
 	// Pull Flight objects from chan and print to file
-	for {
-		f, more := <-printc
-		if more {
-			w.Write(f)
-		} else {
-			// Signal end to main
-			donec <- true
-			return
-		}
+	for j := range jobs {
+		w.Write(*j)
+		wg.Done()
 	}
 }
 
-func toSlice(f Flight) *[]string {
+func (f *Flight) toSlice() *[]string {
 	ret := make([]string, 19)
 
 	ret[0] = f.Date
