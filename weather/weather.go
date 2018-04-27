@@ -20,14 +20,8 @@ import (
 const darkSkyURL string = "https://api.darksky.net/forecast/"
 
 // Get fetches the weather data (either from cache or darksky) and returns a map[string]interface{} of the json values
-<<<<<<< HEAD
 func Get(a airports.Airport, t time.Time) (*(darksky.DataPoint), error) {
 	var (
-=======
-func Get(a airports.Airport, t time.Time) (map[string]string, error) {
-	var (
-		ret     map[string]string
->>>>>>> 8b48c247dcea45420a353d72781d1601c8cea295
 		rndTime = t.Round(time.Hour)
 		hash    = fmt.Sprintf("%x", sha1.Sum([]byte(a.IATA+fmt.Sprint(rndTime.Unix()))))
 	)
