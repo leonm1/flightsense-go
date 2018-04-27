@@ -251,7 +251,7 @@ func parseWeatherData(f *Flight, conc chan bool) {
 
 	// Parse origin fields
 	f.TempOrigin = weatherOrigin["temperature"].(float64)
-	if weatherOrigin["precipIntensity"] == nil {
+	if _, ok := weatherOrigin["precipIntensity"]; !ok {
 		f.PrecipTypeOrigin = "none"
 		f.PrecipIntensityOrigin = 0
 	} else {
@@ -261,7 +261,7 @@ func parseWeatherData(f *Flight, conc chan bool) {
 
 	// Parse destination fields
 	f.TempDest = weatherDest["temperature"].(float64)
-	if weatherDest["precipIntensity"] == nil {
+	if _, ok := weatherDest["precipIntensity"]; !ok {
 		f.PrecipTypeDest = "none"
 		f.PrecipIntensityDest = 0
 	} else {
