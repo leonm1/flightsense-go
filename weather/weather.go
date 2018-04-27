@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/leonm1/airports-go"
@@ -19,16 +20,15 @@ import (
 const darkSkyURL string = "https://api.darksky.net/forecast/"
 
 // Get fetches the weather data (either from cache or darksky) and returns a map[string]interface{} of the json values
-func Get(a airports.Airport, t time.Time) (map[string]interface{}, error) {
+func Get(a airports.Airport, t time.Time) (*(darksky.DataPoint), error) {
 	var (
-		ret     map[string]interface{}
 		rndTime = t.Round(time.Hour)
 		hash    = fmt.Sprintf("%x", sha1.Sum([]byte(a.IATA+fmt.Sprint(rndTime.Unix()))))
 	)
 
 	// In case of cache hit
 	if res, err := cachemap.Get(hash); err == nil {
-		err = json.Unmarshal([]byte(res), &ret)
+		ret, err := unmarshalCache(res)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -46,18 +46,7 @@ func Get(a airports.Airport, t time.Time) (map[string]interface{}, error) {
 
 	err = cache(a.IATA, f.Hourly.Data)
 
-	// Resolve naming
-	enc, err := json.Marshal(f.Currently)
-	if err != nil {
-		log.Fatalf("Error parsing weather data: %s", err)
-	}
-
-	err = json.Unmarshal(enc, &ret)
-	if err != nil {
-		log.Fatalf("Error parsing weather data: %s", err)
-	}
-
-	return ret, nil
+	return &f.Currently, nil
 }
 
 func cache(iata string, f []darksky.DataPoint) error {
@@ -75,4 +64,13 @@ func cache(iata string, f []darksky.DataPoint) error {
 	}
 
 	return err
+}
+
+func unmarshalCache(s string) (*(darksky.DataPoint), error) {
+	var d darksky.DataPoint
+	if err := json.NewDecoder(strings.NewReader(s)).Decode(&d); err != nil {
+		return nil, err
+	}
+
+	return &d, nil
 }
