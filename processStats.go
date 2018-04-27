@@ -21,7 +21,8 @@ import (
 )
 
 const (
-	weatherURL = "http://localhost"
+	weatherURL       = "http://localhost"
+	concurrencyLimit = 8
 )
 
 var header = []string{"absoluteTime",
@@ -205,10 +206,14 @@ func readFile(infilename string, outfilename string) {
 	// Start writer thread
 	go printer(donec, printc, outfilename, f)
 
+	jobs := make(chan bool, concurrencyLimit)
+
 	// Iterate through
 	for row, err := r.Read(); err == nil; row, err = r.Read() {
 		wg.Add(1)
-		go func(row []string) {
+		jobs <- true // Limit concurrency
+
+		func(row []string) {
 			defer wg.Done()
 
 			f, err := parseRow(row, header)
@@ -219,6 +224,8 @@ func readFile(infilename string, outfilename string) {
 				printc <- *toSlice(f)
 			}
 
+			// Concurrency limit
+			<-jobs
 		}(row)
 	}
 

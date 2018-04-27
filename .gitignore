@@ -4,3 +4,5 @@ log.txt
 .env
 flightsense
 flightsense-go
+.vscode
+debug
