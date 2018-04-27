@@ -27,9 +27,9 @@ func Set(key string, value string) error {
 		}
 	}
 
-	append(key, value)
-
-	cache.LoadOrStore(key, value)
+	if _, loaded := cache.LoadOrStore(key, value); !loaded {
+		append(key, value)
+	}
 
 	return nil
 }
