@@ -1,0 +1,10 @@
+[default]
+name=Default
+runtime=host
+config-opts=
+run-opts=
+prefix=/home/matth/.cache/gnome-builder/install/flightsense-go/host
+app-id=
+postbuild=
+prebuild=
+default=true

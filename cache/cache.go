@@ -20,6 +20,7 @@ var (
 
 // Set caches a value in the map and writes it to disk
 func Set(key string, value string) error {
+	// Initialize cache
 	if !initialized {
 		err := Load(defaultCache)
 		if err != nil {
@@ -36,6 +37,7 @@ func Set(key string, value string) error {
 
 // Get returns a value from the map
 func Get(key string) (string, error) {
+	// Initialize cache
 	if !initialized {
 		err := Load(defaultCache)
 		if err != nil {
