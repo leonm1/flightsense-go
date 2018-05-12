@@ -54,21 +54,21 @@ func main() {
 
 func processFile(fn, out *string, c *cache.Cache) error {
 	var (
-		rowCh   = make(chan map[string]string)
+		rowCh   = make(chan map[string]string, runtime.GOMAXPROCS(0))
 		printCh = make(chan []string)
-		wg      *sync.WaitGroup
+		wg      = &sync.WaitGroup{}
 	)
 
 	// Start worker threads
 	for i := 0; i < runtime.GOMAXPROCS(0); i++ {
-		parse.Worker(rowCh, printCh, c, wg)
+		go parse.Worker(rowCh, printCh, c, wg)
 	}
 
 	// Get output file name
 	outFName := *out + filepath.Base(*fn)
 
 	// Start printer thread
-	printer(printCh, &outFName, wg)
+	go printer(printCh, &outFName, wg)
 
 	log.Printf("Processing %s to %s...", *fn, outFName)
 
@@ -101,11 +101,17 @@ func processFile(fn, out *string, c *cache.Cache) error {
 		rowCh <- line
 	}
 
-	wg.Wait()
-
-	// Signal goroutines to exit
+	// Signal end of file
 	close(rowCh)
-	close(printCh)
+
+	wg.Wait() // First wait for row handling to end
+
+	wg.Add(1)      // Final wait for end of file flush
+	close(printCh) // Signal printer to exit
+
+	wg.Wait() // Second wait for file writing to end
+
+	log.Printf("Finished processing %s.", *fn)
 
 	return nil
 }
@@ -233,4 +239,7 @@ func printer(printCh chan []string, outName *string, wg *sync.WaitGroup) {
 		w.Write(j)
 		wg.Done()
 	}
+
+	// Last wg addition after loop in processFile()
+	wg.Done()
 }
