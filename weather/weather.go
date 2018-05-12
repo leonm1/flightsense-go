@@ -20,14 +20,14 @@ import (
 const darkSkyURL string = "https://api.darksky.net/forecast/"
 
 // Get fetches the weather data (either from cache or darksky) and returns a map[string]interface{} of the json values
-func Get(a airports.Airport, t time.Time) (*(darksky.DataPoint), error) {
+func Get(a airports.Airport, t time.Time, c *(cache.Cache)) (*(darksky.DataPoint), error) {
 	var (
 		rndTime = t.Round(time.Hour)
 		hash    = fmt.Sprintf("%x", sha1.Sum([]byte(a.IATA+fmt.Sprint(rndTime.Unix()))))
 	)
 
 	// In case of cache hit
-	if res, err := cachemap.Get(hash); err == nil {
+	if res, err := c.Get(hash); err == nil {
 		ret, err := unmarshalCache(res)
 		if err != nil {
 			log.Fatal(err)
@@ -44,12 +44,12 @@ func Get(a airports.Airport, t time.Time) (*(darksky.DataPoint), error) {
 		log.Fatalf("Error fetching weather data from darksky: %s", err)
 	}
 
-	err = cache(a.IATA, f.Hourly.Data)
+	err = cacheData(a.IATA, f.Hourly.Data, c)
 
 	return &f.Currently, nil
 }
 
-func cache(iata string, f []darksky.DataPoint) error {
+func cacheData(iata string, f []darksky.DataPoint, c *(cache.Cache)) error {
 	var err error
 
 	for _, v := range f {
@@ -60,7 +60,7 @@ func cache(iata string, f []darksky.DataPoint) error {
 			log.Printf("Error caching data: %s", err)
 		}
 
-		cachemap.Set(hash, string(data))
+		c.Set(hash, string(data))
 	}
 
 	return err

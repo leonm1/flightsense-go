@@ -30,7 +30,8 @@ type Flight struct {
 	PrecipTypeDest        string           `json:"destPrecipType" csv:"PRECIP_TYPE_DEST"`
 }
 
-var header = []string{"absoluteTime",
+var header = []string{
+	"absoluteTime",
 	"year",
 	"month",
 	"day",
@@ -51,7 +52,13 @@ var header = []string{"absoluteTime",
 	"precipIntensityDest",
 }
 
-func (f *Flight) ToString() string {
+// Headers outputs a slice containing the field names of the struct
+func (f *Flight) Headers() []string {
+	return header
+}
+
+// ToSlice outputs a slice of values from
+func (f *Flight) ToSlice() []string {
 	ret := make([]string, 19)
 
 	ret[0] = f.Date
@@ -74,5 +81,5 @@ func (f *Flight) ToString() string {
 	ret[17] = f.PrecipTypeDest
 	ret[18] = strconv.FormatFloat(f.PrecipIntensityDest, 'f', -1, 64)
 
-	return &ret
+	return ret
 }

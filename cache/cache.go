@@ -1,8 +1,9 @@
-// Package cachemap provides a persistent map-based caching utility for go
-package cachemap
+// Package cache provides a sync.Map implementation with compressed disk i/o
+package cache
 
 import (
 	"bufio"
+	"compress/gzip"
 	"fmt"
 	"log"
 	"os"
@@ -10,89 +11,91 @@ import (
 	"sync"
 )
 
-const defaultCache = "cache.txt"
+type Cache struct {
+	data sync.Map
+	name string
+}
 
-var (
-	cache       sync.Map
-	cachename   string
-	initialized = false
-)
+// New returns an initialized cache
+func New() *Cache {
+	c := new(Cache)
+	c.name = "weather.cache"
 
-// Set caches a value in the map and writes it to disk
-func Set(key string, value string) error {
-	// Initialize cache
-	if !initialized {
-		err := Load(defaultCache)
-		if err != nil {
-			log.Fatalf("Error loading cache: %s", err)
+	return c
+}
+
+// Load initializes the in-memory map with the information from the disk cache
+func Load(filename string) (*Cache, error) {
+	c := new(Cache)
+	c.name = "weather.cache"
+
+	// Open cache file
+	f, err := os.OpenFile(c.name, os.O_CREATE|os.O_RDONLY, 0644)
+	defer f.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	// Wrap file in gzip reader
+	r, err := gzip.NewReader(f)
+	defer r.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	// Wrap gzip reader in scanner
+	s := bufio.NewScanner(r)
+
+	// Scan each line in the file
+	for s.Scan() {
+		line := s.Text()
+		val := strings.Split(line, "_")
+
+		// Load into map
+		if len(val) == 2 {
+			if _, loaded := c.data.LoadOrStore(val[0], val[1]); loaded {
+				log.Printf("Duplicate value in cache for key '%s'", val[0])
+			}
 		}
 	}
 
-	if _, loaded := cache.LoadOrStore(key, value); !loaded {
-		append(key, value)
+	return c, nil
+}
+
+// Set caches a value in the map and writes it to disk
+func (c *Cache) Set(k string, v string) error {
+	if _, loaded := c.data.LoadOrStore(k, v); !loaded {
+		c.appendFile(k, v)
 	}
 
 	return nil
 }
 
 // Get returns a value from the map
-func Get(key string) (string, error) {
-	// Initialize cache
-	if !initialized {
-		err := Load(defaultCache)
-		if err != nil {
-			log.Printf("Looks like the default cache doesn't exist: %s", err)
-		}
-	}
-
-	if v, ok := cache.Load(key); ok {
+func (c *Cache) Get(k string) (string, error) {
+	if v, ok := c.data.Load(k); ok {
 		return v.(string), nil
 	}
 
 	return "", fmt.Errorf("Key not found")
 }
 
-// Load initializes the in-memory map with the information from the disk cache
-func Load(filename string) error {
-	cachename = filename
-	initialized = true
+// Export writes a new cache file to disk with 'filename' as the file name
+func (c *Cache) Export(filename string) error {
+	c.name = filename
 
-	f, err := os.OpenFile(cachename, os.O_CREATE|os.O_RDONLY, 0644)
+	f, err := os.OpenFile(c.name, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
 	defer f.Close()
 	if err != nil {
 		return err
 	}
 
-	scanner := bufio.NewScanner(f)
+	// Wrap file in gzip writer
+	w := gzip.NewWriter(f)
+	defer w.Close()
 
-	// Load each line into map
-	for scanner.Scan() {
-		line := scanner.Text()
-		val := strings.Split(line, "_")
-
-		// Load into map
-		if len(val) == 2 {
-			if _, loaded := cache.LoadOrStore(val[0], val[1]); loaded {
-				log.Printf("Duplicate value in cache for key '%s'", val[0])
-			}
-		}
-	}
-
-	return nil
-}
-
-// Export writes a new disk cache file
-func Export(filename string) error {
-	cachename = filename
-
-	f, err := os.OpenFile(cachename, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
-	defer f.Close()
-	if err != nil {
-		return err
-	}
-
-	cache.Range(func(k interface{}, v interface{}) bool {
-		_, err = fmt.Fprintf(f, "%s_%s\n", k.(string), v.(string))
+	c.data.Range(func(k interface{}, v interface{}) bool {
+		_, err = fmt.Fprintf(w, "%s_%s\n", k.(string), v.(string))
 		if err != nil {
 			log.Fatalf("Error writing cache file: '%s'", err)
 		}
@@ -103,15 +106,18 @@ func Export(filename string) error {
 	return nil
 }
 
-func append(k string, v string) error {
-	f, err := os.OpenFile(cachename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+func (c *Cache) appendFile(k string, v string) error {
+	f, err := os.OpenFile(c.name, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
+	w := gzip.NewWriter(f)
+	defer w.Close()
+
 	// Print key and value delimited by an underscore '_'
-	fmt.Fprintf(f, "%s_%s\n", k, v)
+	fmt.Fprintf(w, "%s_%s\n", k, v)
 
 	return err
 }

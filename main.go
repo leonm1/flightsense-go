@@ -4,249 +4,233 @@ import (
 	"bufio"
 	"encoding/csv"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
+	"runtime"
 	"sync"
 
 	"github.com/joho/godotenv"
 	"github.com/leonm1/flightsense-go/cache"
 	"github.com/leonm1/flightsense-go/flight"
-	"github.com/leonm1/flightsense-go/weather"
-	csvmap "github.com/recursionpharma/go-csv-map"
+	"github.com/leonm1/flightsense-go/parse"
+	csvr "github.com/recursionpharma/go-csv-map"
 )
 
-const (
-	workerCount = 32
-)
+const fileExt = ".csv"
 
 func main() {
+	// Send log to stdout and log.txt
+	if err := createLog(); err != nil {
+		log.Print("Error directing logs to log.txt:", err)
+	}
+
+	// Parse command line flags
+	in, out, err := parseFlags()
+	if err != nil {
+		log.Fatal("Could not parse command-line arguments:", err)
+	}
+
+	// Load dark sky api key
+	if err := populateEnv(); err != nil {
+		log.Fatal("Error loading client secrets. Export environment vars or set .env:", err)
+	}
+
+	// Load cache from disk. If weather.cache is not present, create an empty cache instead
+	c, err := cache.Load("weather.cache")
+	if err != nil {
+		log.Fatal("Could not initialize cache:", err)
+	}
+
+	for _, fn := range in {
+		err := processFile(&fn, out, c)
+		if err != nil {
+			log.Printf("Skipping file %s: ", fn)
+		}
+	}
+}
+
+func processFile(fn, out *string, c *cache.Cache) error {
+	var (
+		rowCh   = make(chan map[string]string)
+		printCh = make(chan []string)
+		wg      *sync.WaitGroup
+	)
+
+	// Start worker threads
+	for i := 0; i < runtime.GOMAXPROCS(0); i++ {
+		parse.Worker(rowCh, printCh, c, wg)
+	}
+
+	// Get output file name
+	outFName := *out + filepath.Base(*fn)
+
+	// Start printer thread
+	printer(printCh, &outFName, wg)
+
+	log.Printf("Processing %s to %s...", *fn, outFName)
+
+	// Open file for reading
+	f, err := os.Open(*fn)
+	if err != nil {
+		return fmt.Errorf("could not open %s: %s", *fn, err)
+	}
+
+	// Wrap file in csv winter
+	r := csvr.NewReader(bufio.NewReader(f))
+
+	h, err := r.ReadHeader()
+	if err != nil {
+		return fmt.Errorf("could not parse header of %s, is the CSV properly formatted? %s", *fn, err)
+	}
+	r.Columns = h
+
+	for {
+		line, err := r.Read()
+		if err == io.EOF {
+			break
+		} else if err != nil {
+			log.Printf("Could not parse line in %s: %s", *fn, err)
+			continue
+		}
+
+		// Send line to workers
+		wg.Add(1)
+		rowCh <- line
+	}
+
+	wg.Wait()
+
+	// Signal goroutines to exit
+	close(rowCh)
+	close(printCh)
+
+	return nil
+}
+
+func populateEnv() error {
+	if _, loaded := os.LookupEnv("DARK_SKY_API_KEY"); !loaded {
+		if err := godotenv.Load(".env"); err != nil {
+			return err
+		}
+	}
+
+	if _, loaded := os.LookupEnv("DARK_SKY_API_KEY"); !loaded {
+		return fmt.Errorf("DARK_SKY_API_KEY not set")
+	}
+
+	return nil
+}
+
+func createLog() error {
 	// Create log file and direct output to file and console
 	logFile, err := os.Create("log.txt")
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	logW := io.MultiWriter(os.Stdout, logFile)
 	log.SetOutput(logW)
 
-	// Load files
-	files, filenames, outPath := parseArguments()
-
-	// Load environment vars (DARK_SKY_API_KEY)
-	err = godotenv.Load(".env")
-	if err != nil {
-		log.Fatal("Client secrets not found. Please configure dotenv")
-	}
-
-	// Load weather data cache
-	err = cachemap.Load("cache.txt")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	for i, in := range *files {
-		log.Printf("Processing %s to %s", in, *outPath+(*filenames)[i])
-		readFile(in, *outPath+(*filenames)[i])
-	}
-
+	return nil
 }
 
-// readFile is the main function which executes the reading of a csv file from
-//
-func readFile(infilename string, outfilename string) {
-	wg := new(sync.WaitGroup)
-	workerWG := new(sync.WaitGroup)
-	printc := make(chan *[]string, workerCount)
-	jobs := make(chan *flight.Flight, workerCount)
-	rowc := make(chan map[string]string, workerCount)
+func parseFlags() ([]string, *string, error) {
+	var (
+		in, out string
+		recurse bool
+		files   []string
+	)
 
-	// Create CSV reader
-	file, err := os.Open(infilename)
+	flag.StringVar(&in, "i", "data/", "Input: either a folder or a single csv file")
+	flag.StringVar(&out, "o", "out/", "Output: either a folder or a single csv file")
+	flag.BoolVar(&recurse, "r", false, "Recurse through subdirectories")
+	flag.Parse()
+
+	// Parse wildcard characters
+	inGlob, err := filepath.Glob(in)
 	if err != nil {
-		log.Fatalf("Cannot open '%s': %s\n", infilename, err.Error())
-	}
-	defer file.Close()
-	r := csvmap.NewReader(file)
-
-	// Read header
-	r.Columns, err = r.ReadHeader()
-	if err != nil {
-		log.Fatal("Could not read csv header:", err)
+		log.Printf("Error globbing filename: %s", err)
 	}
 
-	// Start writer thread
-	go printer(printc, &outfilename, wg)
+	// Populate list of input files
+	for _, v := range inGlob {
+		// 'v' is a .csv file
+		if filepath.Ext(v) == fileExt {
 
-	// Start worker threads
-	workerWG.Add(workerCount)
-	for w := 0; w < workerCount; w++ {
-		go parser(rowc, jobs, wg)
-		go worker(jobs, printc, workerWG)
-	}
+			// Add file if it exists
+			if _, err := os.Stat(in); err == nil {
+				files = append(files, v)
+			} else { // Error
+				return nil, nil, fmt.Errorf("404 - File not found: %s", err)
+			}
 
-	// Iterate through file
-	for row, err := r.Read(); err == nil; row, err = r.Read() {
-		wg.Add(1)
-		rowc <- row
-	}
-	// Signal end of parser pool work
-	close(rowc)
-
-	// Wait for printer to finish
-	wg.Wait()
-}
-
-// worker is a worker responsible for getting the weather information for the source and
-// destination airports for each *Flight sent over the jobs channel
-func worker(jobs chan *flight.Flight, printc chan *[]string, workerWG *sync.WaitGroup) {
-	// Accept incoming flights to process
-	for f := range jobs {
-		// Get weather at origin airport at time of departure
-		weatherOrigin, err := weather.Get(f.Origin, f.ScheduledDep)
-		if err != nil {
-			log.Fatalf("Could not get weather for %s on %s: %s", f.Origin.IATA, f.ScheduledDep.String(), err)
-		}
-
-		weatherDest, err := weather.Get(f.Destination, f.ScheduledDep)
-		if err != nil {
-			log.Fatalf("Could not get weather for %s on %s: %s", f.Destination.IATA, f.ScheduledDep.String(), err)
-		}
-
-		// Parse origin fields
-		f.TempOrigin = weatherOrigin.Temperature
-		if weatherOrigin.PrecipIntensity == 0 {
-			f.PrecipTypeOrigin = "none"
-			f.PrecipIntensityOrigin = 0
+			// 'v' is a directory
 		} else {
-			f.PrecipTypeOrigin = weatherOrigin.PrecipType
-			f.PrecipIntensityOrigin = weatherOrigin.PrecipIntensity
-		}
 
-		// Parse destination fields
-		f.TempDest = weatherDest.Temperature
-		if weatherDest.PrecipIntensity == 0 {
-			f.PrecipTypeDest = "none"
-			f.PrecipIntensityDest = 0
-		} else {
-			f.PrecipTypeDest = weatherDest.PrecipType
-			f.PrecipIntensityDest = weatherDest.PrecipIntensity
-		}
+			// Search directory for CSV files
+			err := filepath.Walk(v, func(p string, inf os.FileInfo, e error) error {
 
-		printc <- f.toSlice()
+				if e != nil {
+					return fmt.Errorf("Error reading directory: %s", e)
+				}
+
+				// Skip subdirectory if recursion is disabled
+				if !recurse && inf.IsDir() {
+					return filepath.SkipDir
+				}
+
+				// Add csv files to list of files to process
+				if filepath.Ext(p) == fileExt {
+					files = append(files, p+inf.Name())
+				}
+
+				// No error
+				return nil
+
+			})
+			// Check error on filepath.Walk
+			if err != nil {
+				return nil, nil, err
+			}
+		}
 	}
 
-	// Wait for worker pool to finish
-	workerWG.Done()
-	workerWG.Wait()
-	close(printc)
+	// Populate output directory
+	if filepath.Ext(out) == "" {
+		if err := os.MkdirAll(out, 777); err != nil {
+			return nil, nil, fmt.Errorf("Could not create output dir")
+		}
+	} else {
+		// Output cannot be a file
+		return nil, nil, fmt.Errorf("output must be a directory")
+	}
+
+	return files, &out, nil
 }
 
 // printer is a worker which uses a buffered writer to write each struct to a csv file
 // the function listens on printc for new jobs. Not concurrency safe.
-func printer(printc chan *[]string, outname *string, wg *sync.WaitGroup) {
+func printer(printCh chan []string, outName *string, wg *sync.WaitGroup) {
 	var f flight.Flight
 
 	// Create and open outfile
-	outfile, err := os.Create(*outname)
+	outF, err := os.Create(*outName)
+	defer outF.Close()
 	if err != nil {
-		log.Fatalf("Cannot open '%s': %s\n", *outname, err.Error())
+		log.Fatalf("Cannot open '%s': %s\n", *outName, err.Error())
 	}
 
-	w := csv.NewWriter(bufio.NewWriter(outfile))
-	defer func() {
-		w.Flush()
-		outfile.Close()
-	}()
+	w := csv.NewWriter(outF)
+	defer w.Flush()
 
 	// Writer header to file
-	w.Write(f)
+	w.Write(f.Headers())
 
 	// Pull Flight objects from chan and print to file
-	for j := range printc {
-		w.Write(*j)
+	for j := range printCh {
+		w.Write(j)
 		wg.Done()
 	}
-}
-
-func parseArguments() (*[]string, *[]string, *string) {
-	var (
-		files     []string
-		filenames []string
-		outPath   string
-	)
-
-	// Parse command-line flags for input and output files
-	inname := flag.String("in", "", "Optional: Input file name (Cycles through directory if ommitted)")
-	infolder := flag.String("indir", "", "Directory of source data files")
-	outFolder := flag.String("outdir", "", "Directory of destination data files")
-	flag.Parse()
-
-	if *inname == "" && *infolder == "" {
-		log.Fatalf("Input arguments requrired!")
-		os.Exit(1)
-	}
-
-	if strings.Contains(*inname, "/") && *infolder == "" {
-		s := strings.Split(*inname, "/")
-
-		// Set filename as inname
-		*inname = s[len(s)-1]
-
-		// Remove filename
-		s = s[:len(s)-1]
-		*infolder = strings.Join(s, "/")
-		log.Printf("*infolder is now '%s'", *infolder)
-	}
-
-	if !strings.HasSuffix(*outFolder, "/") {
-		if *outFolder == "" {
-			outPath = "./"
-		} else {
-			outPath = *outFolder + "/"
-		}
-	}
-
-	// Read all csv files in indir, skipping subdirectories
-	filepath.Walk(*infolder, func(path string, f os.FileInfo, _ error) error {
-		if f.IsDir() && path != *infolder {
-			log.Printf("Skipping dir \"%s\"", f.Name())
-			// Skip subdirectories
-			return filepath.SkipDir
-		} else if *inname != "" {
-			if f.Name() == *inname {
-				files = append(files, path)
-				filenames = append(filenames, f.Name())
-			}
-		} else if filepath.Ext(path) == ".csv" {
-			files = append(files, path)
-			filenames = append(filenames, f.Name())
-		}
-
-		return nil
-	})
-
-	// Check to ensure input files exist
-	for _, v := range files {
-		if _, err := os.Stat(v); err != nil {
-			if os.IsNotExist(err) {
-				log.Fatalf("Error 404 - File not found: \"%s\".\nHere's the error: %s", v, err)
-			}
-		} else {
-			log.Printf("Found file \"%s\"", v)
-		}
-	}
-
-	// Check if outdir exists
-	if _, err := os.Stat(outPath); err != nil {
-		if os.IsNotExist(err) {
-			os.Create(outPath)
-			log.Printf("Output directory not found, created '%s'", outPath)
-		} else {
-			log.Fatal(err)
-		}
-	}
-
-	return &files, &filenames, &outPath
 }
